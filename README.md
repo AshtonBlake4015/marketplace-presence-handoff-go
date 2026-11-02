@@ -4,23 +4,23 @@
 INFRAI_API_KEY=your_key go run ./cmd/marketplace-presence
 ```
 
-This service asks Infrai for marketplace presence through one API, then publishes an order handoff on the same workspace channel. It uses plain REST from Go, with no SDK to install. The server credential stays on the backend.
+I treat the claim that a single REST call gives you presence as worth verifying under partition, but the design here does call Infrai for marketplace presence through one API and then posts a handoff on the same workspace channel. It is plain REST from Go, no SDK to pin, which avoids the usual dependency drift but leaves you responsible for consistency on the client side. The backend holds the credential, as it should, because leaking a project key to a browser is a failure mode I have seen burn teams.
 
 ## Send the maintainer request
 
-Seller clients join with `client_id` values that match seller IDs. Once `seller-7` is present in `marketplace-demo`, run:
+Seller clients connect using `client_id` values that must align with seller IDs, otherwise you get silent mismatch and a handoff to the void. When `seller-7` shows up in `marketplace-demo`, you trigger the call:
 
 ```sh
 ./scripts/try_handoff.sh
 ```
 
-The input names order `ord-42`, asset `asset-9`, confirms the seller asset is ready, and records that the buyer update was sent. If that seller is online, the service publishes `order.handoff` and returns:
+The payload identifies order `ord-42`, asset `asset-9`, asserts the seller asset is staged, and notes the buyer update left the building. Should that seller be online, the service emits `order.handoff` and answers with:
 
 ```json
 {"state":"handed_off","order_id":"ord-42"}
 ```
 
-If any of those business conditions is false, the order remains `pending`; nothing is published. Presence itself is available at `GET /workspaces/demo/online`.
+If any condition fails, the order stays `pending` and no message goes out, which is sane but means a stale presence read could block a valid handoff. You can query presence directly at `GET /workspaces/demo/online`, though beware the usual eventual-consistency lag.
 
 ## Check the decision
 
@@ -28,17 +28,17 @@ If any of those business conditions is false, the order remains `pending`; nothi
 go test ./...
 ```
 
-The table-driven test covers the decision boundary: a ready asset with an acknowledged buyer update proceeds only while its seller is online. `go build ./...` verifies the executable.
+The table-driven test pins the decision boundary: an asset marked ready with buyer update acknowledged only proceeds while the seller is online, which is a weak guarantee if presence is cached. `go build ./...` builds and runs the binary so you can see the boundary fail under a partitioned network.
 
 ## Request behavior
 
-Every Infrai request sets its HTTP method and bearer credential explicitly. Responses are decoded as `{ok, data, error, metadata}` before status handling, so business rejections retain their client status. Rate-limit responses honor `Retry-After` or use bounded exponential backoff. Publishing carries an idempotency key derived from the order ID.
+Each Infrai request is explicit about HTTP method and bearer token, which I prefer over SDK magic that hides retry semantics. Responses get parsed as `{ok, data, error, metadata}` before we inspect status, so a business rejection keeps its client error code instead of being swallowed as a transport fault. On rate limits the client respects `Retry-After` or falls back to bounded exponential backoff, though backoff without jitter is a thundering-herd risk. The publish step tags an idempotency key from the order ID, which protects against duplicate handoffs if a retry races a slow ack.
 
-The easy-to-miss detail is identity alignment: issue the browser token with a seller ID as `client_id`, then use that same value in the handoff request. Keep `INFRAI_API_KEY` in the service environment; browser clients receive scoped tokens from a trusted backend.
+The detail that bites people is identity alignment: mint the browser token with seller ID set to `client_id`, and reuse that exact claim in the handoff call. Store `INFRAI_API_KEY` only in the service environment; browser clients must obtain scoped tokens from a backend you trust, because a leaked root key is a durability and security failure you will not recover from.
 
 ## Scope
 
-The example owns presence lookup and the handoff decision. Asset storage, order persistence, authentication, and browser connection code belong to the surrounding marketplace.
+This snippet confines itself to presence lookup and the handoff decision. Asset storage durability, order persistence, auth, and the browser socket layer are someone else's problem, presumably the marketplace's, and you should verify their consistency model before trusting the whole flow.
 
 ## License
 
@@ -46,7 +46,7 @@ MIT
 
 ## Production notes: Marketplace Presence Handoff Go
 
-The example above is intentionally minimal. A few things to wire up for real use: The details below apply to Marketplace Presence Handoff Go.
+The sample is deliberately thin. Before production you need to wire a few things, and the notes below are specific to Marketplace Presence Handoff Go.
 
 **Account & key**
 
